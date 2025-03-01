@@ -1,0 +1,807 @@
+/*
+* @author: Xinzhe Wang
+*/
+
+machine(MachineType:L2Cache, "LLC") :
+    // Directory memory
+    DirectoryMemory *directory;
+    // Cache memory
+    CacheMemory *cacheMemory;
+
+    // Latency
+    Cycles cache_access_latency := 1;
+    
+    // Interface to the network
+    // Coherence request and response
+    MessageBuffer *requestIn, network="From", virtual_network="1", vnet_type="request";
+    MessageBuffer *responseIn, network="From", virtual_network="2", vnet_type="response";
+    MessageBuffer *backInvOut, network="To", virtual_network="3", vnet_type="request";
+    MessageBuffer *responseOut, network="To", virtual_network="2", vnet_type="response";
+
+    // Interface to the directory
+    MessageBuffer *requestToDir, network="To", virtual_network="4", vnet_type="request";
+    MessageBuffer *responseFromDir, network="From", virtual_network="5", vnet_type="response";
+
+    // Profiler
+    CustomProfiler *profiler;
+
+    // Boolean indicating if partitioned replacement policy is in use in the LLC
+    bool llc_use_par_rp;
+
+{
+
+    ////////////////////////////////////////////////////////////////////////////
+    // STATES
+    ////////////////////////////////////////////////////////////////////////////
+
+    state_declaration(State, desc="State", default="L2Cache_State_InMem") {
+        // stable states
+        InMem, AccessPermission:Invalid, desc="Cache line data is in memory, not in caching hierarchy";
+        V_Clean, AccessPermission:Read_Only, desc="Cache line clean and owned by LLC";
+        V_Dirty, AccessPermission:Read_Only, desc="Cache line dirty and owned by LLC";
+        M, AccessPermission:Maybe_Stale, desc="Cache line is in M state in L1";
+
+        // transient state
+        MV_D, AccessPermission:Busy, desc="Transient state from M to V, waiting for data writeback from L1";
+        MI_D, AccessPermission:Busy, desc="Transient state from M to I, waiting for data writeback from L1";
+
+        // transient state for memory read/write pending
+        MemReadPending_M, AccessPermission:Busy, desc="...";
+        MemReadPending_V, AccessPermission:Busy, desc="...";
+        MemWritePending, AccessPermission:Busy, desc="Memory write is pending";
+    }
+
+    ////////////////////////////////////////////////////////////////////////////
+    // EVENTS
+    ////////////////////////////////////////////////////////////////////////////
+
+    enumeration(Event, desc="Cache events") {
+        // Events triggered by receiving L1 requests
+        GetS, desc="...";
+        GetM, desc="...";
+        Put, desc="...";
+        Upg, desc="...";
+        // Stall_Req, desc="...";
+
+        // Event triggered by receiving data response (data writeback from L1)
+        L1_Writeback_Data, desc="...";
+
+        // Replacement event (normal mode)
+        Replacement, desc="...";  // Replacement event in normal mode when replacing an cache entry
+        
+        // Replacement event (partition mode)
+        Par_Replacement, desc="...";  // Replacement event in a partition that only removes a cache entry from the partition but not the cache set
+        Par_Replacement_M, desc="...";  // Special case of Par_Replacement when back invalidated copy is cached in M state
+        Phy_Replacement, desc="...";  // Replacement event that physically removes a cache entry from the cache set
+
+        // Events triggered by receiving memory responses
+        Mem_Response, desc="...";
+        Mem_Ack, desc="...";
+    }
+
+    ////////////////////////////////////////////////////////////////////////////
+    // STRUCTURES
+    ////////////////////////////////////////////////////////////////////////////
+
+    // Directory entry
+    structure(Entry, desc="Directory entry", interface="AbstractCacheEntry", main="false") {
+        // cache entry fields
+        State state, desc="State";
+        DataBlock dataBlk, desc="Data block";
+        MachineID owner, desc="Owner machine ID";
+        bool dirty, desc="Dirty bit";
+        bool cacheEntryAllocated, desc="...";
+
+        // transaction buffer fields
+        // for on-demand request (GetS/GetM)
+        Cycles memReadReqID, desc="...";
+        MachineID memReadRequestor, desc="...";
+        bool writebackTriggered, desc="...";
+        // for Put request
+        bool putPending, desc="...";
+        Cycles putReqID, desc="...";
+        MachineID putRequestor, desc="...";
+        // for writeback victim
+        bool writebackPending, desc="...";
+        MachineID dependentMemReadRequestor, desc="...";
+        Addr dependentMemReadAddr, desc="...";
+    }
+
+    // Cache entry
+    structure(CacheEntry, desc="Cache entry", interface="AbstractCacheEntry") {
+        bool dummy_field;
+    }
+
+    // TBE
+    structure(TBE, desc="Transaction buffer entry") {
+        bool dummy_field;
+    }
+
+    structure(TBETable, external="yes") {
+        TBE lookup(Addr);
+        void allocate(Addr);
+        void deallocate(Addr);
+        bool isPresent(Addr);
+        bool areNSlotsAvailable(int, Tick);
+    }
+
+    TBETable TBEs, template="<L2Cache_TBE>", constructor="m_number_of_TBEs";
+
+    Cycles finish_on, default="Cycles(0)";
+    Cycles enqueue_latency, default="Cycles(1)";
+
+    ////////////////////////////////////////////////////////////////////////////
+    // FUNCTIONS
+    ////////////////////////////////////////////////////////////////////////////
+
+    // External functions
+    Cycles curCycle();
+    Tick clockEdge();
+    Cycles ticksToCycles(Tick t);
+    void set_cache_entry(AbstractCacheEntry a);
+    void unset_cache_entry();
+    void set_tbe(TBE b);
+    void unset_tbe();
+    MachineID mapAddressToMachine(Addr addr, MachineType mtype);
+    void wakeUpAllBuffers();
+
+    // Helper function
+    Cycles max(Cycles a, Cycles b) {
+        if (a > b) {
+            return a;
+        } else {
+            return b;
+        }
+    }
+
+    CacheEntry getCacheEntry(Addr address), return_by_pointer="yes" {
+        return static_cast(CacheEntry, "pointer", cacheMemory.lookup(address));
+    }
+
+    Entry getDirectoryEntry(Addr addr), return_by_pointer="yes" {
+        Entry dir_entry := static_cast(Entry, "pointer", directory[addr]);
+        if (is_valid(dir_entry)) {
+            return dir_entry;
+        }
+        dir_entry := static_cast(Entry, "pointer", directory.allocate(addr, new Entry));
+        return dir_entry;
+    }
+
+    void deallocateCacheEntry(Addr address) {
+        // deallocate a cache block from its cache set
+        if (cacheMemory.isTagPresent(address)) {
+            cacheMemory.deallocate(address);
+        }
+    }
+
+    void deallocateCacheEntry(Addr address, int par_id) {
+        // only moves a cache block outside the given parition
+        // do not deallocate it from its cache set
+        assert(llc_use_par_rp);
+        assert(cacheMemory.isTagPresent(address));
+        cacheMemory.deallocate(address, par_id);
+    }
+
+    // Interface functions required by SLICC
+    State getState(TBE tbe, CacheEntry cache_entry, Addr addr) {
+        return getDirectoryEntry(addr).state;
+    }
+
+    void setState(TBE tbe, CacheEntry cache_entry, Addr addr, State state) {
+        getDirectoryEntry(addr).state := state;
+    }
+
+    AccessPermission getAccessPermission(Addr addr) {
+        if (directory.isPresent(addr)) {
+            return L2Cache_State_to_permission(getDirectoryEntry(addr).state);
+        } else {
+            return AccessPermission:Invalid;
+        }
+    }
+
+    void setAccessPermission(CacheEntry cache_entry, Addr addr, State state) {
+        if (directory.isPresent(addr)) {
+            getDirectoryEntry(addr).changePermission(L2Cache_State_to_permission(state));
+        }
+    }
+
+    void functionalRead(Addr addr, Packet *pkt) {
+        Entry dir_entry := getDirectoryEntry(addr);
+        CacheEntry cache_entry := getCacheEntry(addr);
+        if (is_valid(cache_entry)) {
+            testAndRead(addr, dir_entry.dataBlk, pkt);
+        }
+    }
+
+    int functionalWrite(Addr addr, Packet *pkt) {
+        int num_functional_writes := 0;
+        Entry dir_entry := getDirectoryEntry(addr);
+        CacheEntry cache_entry := getCacheEntry(addr);
+        if (is_valid(cache_entry)) {
+            num_functional_writes := num_functional_writes + testAndWrite(addr, dir_entry.dataBlk, pkt);
+        }
+        return num_functional_writes;
+    }
+
+    // Performance modelling interface
+
+    enumeration(RequestType, desc="To communicate stats from transitions to recordStats") {
+        BankAccess,    desc="Read or write the cache data array";
+    }
+
+    void recordRequestType(RequestType request_type, Addr addr) {
+        if (request_type == RequestType:BankAccess) {
+            Cycles current_cycle := curCycle();
+            if (finish_on > current_cycle) {
+                finish_on := finish_on + cache_access_latency;
+            } else {
+                finish_on := current_cycle + cache_access_latency;
+            }
+            enqueue_latency := finish_on - current_cycle;
+        }
+    }
+
+    bool _checkResourceAvailable(RequestType request_type, Addr addr) {
+        if (request_type == RequestType:BankAccess) {
+            return true;
+        } else {
+            error("Invalid RequestType type in checkResourceAvailable");
+            return true;
+        }
+    }
+
+    bool checkResourceAvailable(RequestType request_type, Addr addr) {
+        bool avail := _checkResourceAvailable(request_type, addr);
+        if (avail == false) {
+            DPRINTF(RubySlicc, "Resource %s not available for addr: %#x\n", request_type, addr);
+        }
+        return avail;
+    }
+
+    ////////////////////////////////////////////////////////////////////////////
+    // NETWORK PORTS
+    ////////////////////////////////////////////////////////////////////////////
+
+    out_port(backInvOutPort, RequestMsg, backInvOut);
+    out_port(responseOutPort, ResponseMsg, responseOut);
+    out_port(requestToDirOutPort, DirectoryMsg, requestToDir);
+
+    in_port(responseFromDirInPort, DirectoryMsg, responseFromDir, rank = 0) {
+        if (responseFromDirInPort.isReady(clockEdge())) {
+            peek(responseFromDirInPort, DirectoryMsg) {
+                DPRINTF(RubySlicc, "Memory port: see input message %s\n", in_msg);
+                CacheEntry cache_entry := getCacheEntry(in_msg.addr);
+                TBE tbe := TBEs[in_msg.addr];
+                if (in_msg.Type == MemoryRequestType:MEMORY_READ) {
+                    assert(is_valid(cache_entry));
+                    trigger(Event:Mem_Response, in_msg.addr, cache_entry, tbe);
+                } else if (in_msg.Type == MemoryRequestType:MEMORY_WB) {
+                    trigger(Event:Mem_Ack, in_msg.addr, cache_entry, tbe);
+                } else {
+                    error("Invalid memory response message");
+                }
+            }
+        }
+    }
+
+    in_port(responseInPort, ResponseMsg, responseIn, rank = 1) {
+        if (responseInPort.isReady(clockEdge())) {
+            peek(responseInPort, ResponseMsg) {
+                DPRINTF(RubySlicc, "Response port: see input message %s\n", in_msg);
+                CacheEntry cache_entry := getCacheEntry(in_msg.addr);
+                TBE tbe := TBEs[in_msg.addr];
+                assert(in_msg.dirty);
+                trigger(Event:L1_Writeback_Data, in_msg.addr, cache_entry, tbe);
+            }
+        }
+    }
+
+    in_port(requestInPort, RequestMsg, requestIn, rank = 2) {
+        if (requestInPort.isReady(clockEdge())) {
+            peek(requestInPort, RequestMsg) {
+                DPRINTF(RubySlicc, "Request port: see input message %s\n", in_msg);
+                CacheEntry cache_entry := getCacheEntry(in_msg.addr);
+                TBE tbe := TBEs[in_msg.addr];
+
+                if (in_msg.type == CoherenceRequestType:GetS || in_msg.type == CoherenceRequestType:GetM) {
+                    if (llc_use_par_rp) {
+                        // if llc partition is in used
+                        int par_id := IDToInt(machineIDToNodeID(in_msg.requestor));
+                        if (!cacheMemory.cacheAvail(in_msg.addr, par_id)) {
+                            // first check if partition replacement is required
+                            DPRINTF(RubySlicc, "Partition entry is not available for addr 0x%x, selecting a partition victim\n", in_msg.addr);
+                            Addr par_victim := cacheMemory.cacheProbe(in_msg.addr, par_id);
+                            CacheEntry victim_entry := getCacheEntry(par_victim);
+                            Entry victim_dir_entry := getDirectoryEntry(par_victim);
+                            TBE victim_tbe := TBEs[par_victim];
+                            assert(is_valid(victim_entry));
+                            if (victim_dir_entry.state == State:M && victim_dir_entry.owner == in_msg.requestor) {
+                                trigger(Event:Par_Replacement_M, par_victim, victim_entry, victim_tbe);
+                            } else {
+                                trigger(Event:Par_Replacement, par_victim, victim_entry, victim_tbe);
+                            }
+                        } else if (!cacheMemory.cacheAvail(in_msg.addr)) {
+                            // then check if cache entry replacement is required
+                            DPRINTF(RubySlicc, "Cache entry is not available for addr 0x%x, selecting a victim\n", in_msg.addr);
+                            Addr victim_addr := cacheMemory.cacheProbe(in_msg.addr);
+                            CacheEntry victim_entry := getCacheEntry(victim_addr);
+                            TBE victim_tbe := TBEs[victim_addr];
+                            trigger(Event:Phy_Replacement, victim_addr, victim_entry, victim_tbe);
+                        } else {
+                            if (is_invalid(cache_entry)) {
+                                cacheMemory.allocate(in_msg.addr, new CacheEntry, IDToInt(machineIDToNodeID(in_msg.requestor)));
+                                cache_entry := getCacheEntry(in_msg.addr);
+                                assert(is_valid(cache_entry));
+                                cacheMemory.setBusy(in_msg.addr);
+                            }
+                            if (in_msg.type == CoherenceRequestType:GetS) {
+                                trigger(Event:GetS, in_msg.addr, cache_entry, tbe);
+                            } else {
+                                trigger(Event:GetM, in_msg.addr, cache_entry, tbe);
+                            }
+                        } 
+                    } else {
+                        // original logic when no partitioned replacement policy is in use in llc
+                        if (
+                            is_invalid(cache_entry) && (cacheMemory.cacheAvail(in_msg.addr) == false)
+                        ) {
+                            Addr victim_addr := cacheMemory.cacheProbe(in_msg.addr);
+                            CacheEntry victim_entry := getCacheEntry(victim_addr);
+                            TBE victim_tbe := TBEs[victim_addr];
+                            trigger(Event:Replacement, victim_addr, victim_entry, victim_tbe);
+                        } else {
+                            if (is_invalid(cache_entry)) {
+                                cacheMemory.allocate(in_msg.addr, new CacheEntry);
+                                cache_entry := getCacheEntry(in_msg.addr);
+                                assert(is_valid(cache_entry));
+                                cacheMemory.setBusy(in_msg.addr);
+                            }
+                            if (in_msg.type == CoherenceRequestType:GetS) {
+                                trigger(Event:GetS, in_msg.addr, cache_entry, tbe);
+                            } else {
+                                trigger(Event:GetM, in_msg.addr, cache_entry, tbe);
+                            }
+                        } 
+                    }
+                } else if (in_msg.type == CoherenceRequestType:Put) {
+                    trigger(Event:Put, in_msg.addr, cache_entry, tbe);
+                } else if (in_msg.type == CoherenceRequestType:Upg) {
+                    trigger(Event:Upg, in_msg.addr, cache_entry, tbe);
+                } else {
+                    error("Unknown request type");
+                }
+            }
+        }
+    }
+
+    ////////////////////////////////////////////////////////////////////////////
+    // ACTIONS
+    ////////////////////////////////////////////////////////////////////////////
+
+    // actions on cache_entry and tbe
+
+    // Mark cache block as busy so that replacement policy does not select it as victim
+    action(markCacheEntryAsBusy, desc="...") {
+        cacheMemory.setBusy(address);
+    }
+
+    action(markCacheEntryAsBusyIfInNormalMode, desc="...") {
+        if (!llc_use_par_rp) {
+            cacheMemory.setBusy(address);
+        }
+    }
+
+    // Unmark busy status of cache block
+    action(markCacheEntryAsFree, desc="...") {
+        cacheMemory.setFree(address);
+    }
+
+    action(initiatePutRequest, desc="...") {
+        Entry dir_entry := getDirectoryEntry(address);
+        peek(requestInPort, RequestMsg) {
+            dir_entry.putPending := true;
+            dir_entry.putReqID := in_msg.reqID;
+            dir_entry.putRequestor := in_msg.requestor;
+        }
+    }
+
+    action(initiateWriteback, desc="...") {
+        Entry victim_dir_entry := getDirectoryEntry(address);
+        peek(requestInPort, RequestMsg) {
+            assert(!victim_dir_entry.writebackPending);
+            victim_dir_entry.writebackPending := true;
+            victim_dir_entry.dependentMemReadAddr := in_msg.addr;
+            victim_dir_entry.dependentMemReadRequestor := in_msg.requestor;
+            Entry new_dir_entry := getDirectoryEntry(in_msg.addr);
+            assert(!new_dir_entry.writebackTriggered);
+            new_dir_entry.writebackTriggered := true;
+        }
+    }
+
+    action(performParReplacement, desc="...") {
+        peek(requestInPort, RequestMsg) {
+            deallocateCacheEntry(address, IDToInt(machineIDToNodeID(in_msg.requestor)));
+        }
+    }
+
+    action(setDirty, desc="") {
+        assert(is_valid(cache_entry));
+        Entry dir_entry := getDirectoryEntry(address);
+        dir_entry.dirty := true;
+    }
+
+    action(unsetDirty, desc="") {
+        assert(is_valid(cache_entry));
+        Entry dir_entry := getDirectoryEntry(address);
+        dir_entry.dirty := false;
+    }
+
+    action(setOwner, desc="...") {
+        assert(is_valid(cache_entry));
+        Entry dir_entry := getDirectoryEntry(address);
+        peek(requestInPort, RequestMsg) {
+            dir_entry.owner := in_msg.requestor;
+        }
+    }
+
+    action(deallocateCacheEntry, desc="...") {
+        assert(is_valid(cache_entry));
+        deallocateCacheEntry(address);
+        unset_cache_entry();
+    }
+
+    // actions on out_port
+
+    action(sendInv, desc="Send back invalidation") {
+        assert(is_valid(cache_entry));
+        if (llc_use_par_rp) {
+            peek(requestInPort, RequestMsg) {
+                enqueue(backInvOutPort, RequestMsg, 1) {
+                    out_msg.reqID := curCycle();
+                    out_msg.addr := address;
+                    out_msg.type := CoherenceRequestType:Inv;
+                    out_msg.requestor := machineID;
+                    out_msg.Destination.clear();
+                    out_msg.Destination.add(in_msg.requestor);
+                    out_msg.MessageSize := MessageSizeType:Control;
+                }
+            }
+        } else {
+            peek(requestInPort, RequestMsg) {
+                enqueue(backInvOutPort, RequestMsg, 1) {
+                    out_msg.reqID := curCycle();
+                    out_msg.addr := address;
+                    out_msg.type := CoherenceRequestType:Inv;
+                    out_msg.requestor := machineID;
+                    out_msg.Destination.clear();
+                    out_msg.Destination.broadcast(MachineType:L1Cache);
+                    out_msg.MessageSize := MessageSizeType:Control;
+                }
+            }
+        }
+    }
+
+    action(sendMemRead, desc="Send memory read request from entry") {
+        peek(requestInPort, RequestMsg) {
+            Entry dir_entry := getDirectoryEntry(address);
+            dir_entry.memReadRequestor := in_msg.requestor;
+            dir_entry.memReadReqID := in_msg.reqID;
+            if (llc_use_par_rp) {
+                // do a sanity check when partition mode is on
+                // when main memory read is required, the coherence request must not be caused by a prior coherence invalidation
+                assert(!in_msg.fromI);
+            }
+            // send memory read if not writeback is triggered
+            // if writeback is triggered
+            // memory read will be sent upon completion of the writeback (see action completeMemWriteback)
+            if (!dir_entry.writebackTriggered) {
+                enqueue(requestToDirOutPort, DirectoryMsg, 1) {
+                    out_msg.addr := address;
+                    out_msg.Type := MemoryRequestType:MEMORY_READ;
+                    out_msg.Sender := in_msg.requestor;
+                    out_msg.MessageSize := MessageSizeType:Request_Control;
+                    out_msg.Len := 0;
+                    out_msg.Destination.add(mapAddressToMachine(address, MachineType:Directory));
+                }
+            }
+        }
+    }
+
+    action(completeMemWriteback, desc="...") {
+        Entry dir_entry := getDirectoryEntry(address);
+        assert(dir_entry.writebackPending);
+        enqueue(requestToDirOutPort, DirectoryMsg, 1) {
+            out_msg.addr := dir_entry.dependentMemReadAddr;
+            out_msg.Type := MemoryRequestType:MEMORY_READ;
+            out_msg.Sender := dir_entry.dependentMemReadRequestor;
+            out_msg.MessageSize := MessageSizeType:Request_Control;
+            out_msg.Len := 0;
+            out_msg.Destination.add(mapAddressToMachine(dir_entry.dependentMemReadAddr, MachineType:Directory));
+        }
+        dir_entry.writebackPending := false;
+        profiler.profileMemoryWrite();
+        responseFromDirInPort.dequeue(clockEdge());
+        wakeup_port(requestInPort, address);
+    }
+
+    action(completeL1Writeback, desc="...") {
+        Entry dir_entry := getDirectoryEntry(address);
+        peek(responseInPort, ResponseMsg) {
+            dir_entry.dataBlk := in_msg.dataBlk;
+            dir_entry.dirty := in_msg.dirty;
+        }
+        wakeup_port(requestInPort, address);
+    }
+
+    action(sendAckIfPutPending, desc="...") {
+        Entry dir_entry := getDirectoryEntry(address);
+        peek(responseInPort, ResponseMsg) {
+            if (dir_entry.putPending) {
+                enqueue(responseOutPort, ResponseMsg, enqueue_latency) {
+                    out_msg.reqID := dir_entry.putReqID;
+                    out_msg.addr := address;
+                    out_msg.type := CoherenceResponseType:Ack;
+                    out_msg.sender := machineID;
+                    out_msg.Destination.clear();
+                    out_msg.Destination.add(dir_entry.putRequestor);
+                    out_msg.MessageSize := MessageSizeType:Writeback_Control;
+                }
+                dir_entry.putPending := false;
+            }
+        }
+    }
+
+    action(forwardL1Writeback, desc="...") {
+        peek(responseInPort, ResponseMsg) {
+            enqueue(requestToDirOutPort, DirectoryMsg, 1) {
+                out_msg.addr := in_msg.addr;
+                out_msg.Type := MemoryRequestType:MEMORY_WB;
+                out_msg.Sender := machineID;
+                out_msg.MessageSize := MessageSizeType:Writeback_Data;
+                out_msg.DataBlk := in_msg.dataBlk;
+                out_msg.Len := 0;
+                out_msg.Destination.add(mapAddressToMachine(address, MachineType:Directory));
+            }
+        }
+    }
+
+    action(sendMemWrite, desc="Writeback data from LLC to main memory") {
+        assert(is_valid(cache_entry));
+
+        Entry dir_entry := getDirectoryEntry(address);
+        assert(dir_entry.dirty);
+
+        enqueue(requestToDirOutPort, DirectoryMsg, enqueue_latency) {
+            out_msg.addr := address;
+            out_msg.Type := MemoryRequestType:MEMORY_WB;
+            out_msg.Sender := machineID;
+            out_msg.MessageSize := MessageSizeType:Writeback_Data;
+            out_msg.DataBlk := dir_entry.dataBlk;
+            out_msg.Len := 0;
+            out_msg.Destination.add(mapAddressToMachine(address, MachineType:Directory));
+        }
+    }
+
+    action(sendData, desc="Send data") {
+        assert(is_valid(cache_entry));
+        Entry dir_entry := getDirectoryEntry(address);
+        peek(requestInPort, RequestMsg) {
+            bool partition_hit := false;
+            if (llc_use_par_rp) {
+                partition_hit := cacheMemory.isParHit(address, IDToInt(machineIDToNodeID(in_msg.requestor)));
+            }
+            
+            enqueue(responseOutPort, ResponseMsg, enqueue_latency) {
+                out_msg.reqID := in_msg.reqID;
+                out_msg.addr := address;
+                out_msg.type := CoherenceResponseType:FromLLC;
+                out_msg.sender := machineID;
+                out_msg.Destination.clear();
+                out_msg.Destination.add(in_msg.requestor);
+                out_msg.dataBlk := dir_entry.dataBlk;
+                out_msg.dirty := dir_entry.dirty;
+                out_msg.MessageSize := MessageSizeType:Response_Data;
+                out_msg.partition_hit := partition_hit;
+            }
+
+            if (llc_use_par_rp) {
+                if (!in_msg.fromI) {
+                    cacheMemory.setMRU(cache_entry, IDToInt(machineIDToNodeID(in_msg.requestor)));
+                }
+            } else {
+                cacheMemory.setMRU(cache_entry);
+            }
+        }
+    }
+
+    action(completeMemRead, desc="Forward memory data response") {
+        assert(is_valid(cache_entry));
+        Entry dir_entry := getDirectoryEntry(address);
+        if (llc_use_par_rp) {
+            cacheMemory.setMRU(cache_entry, IDToInt(machineIDToNodeID(dir_entry.memReadRequestor)));
+        } else {
+            cacheMemory.setMRU(cache_entry);
+        }
+        peek(responseFromDirInPort, DirectoryMsg) {
+            dir_entry.dataBlk := in_msg.DataBlk;
+            enqueue(responseOutPort, ResponseMsg, enqueue_latency) {
+                out_msg.reqID := dir_entry.memReadReqID;
+                out_msg.addr := in_msg.addr;
+                out_msg.type := CoherenceResponseType:FromMemory;
+                out_msg.sender := in_msg.Sender;
+                out_msg.Destination.clear();
+                out_msg.Destination.add(dir_entry.memReadRequestor);
+                out_msg.dataBlk := in_msg.DataBlk;
+                out_msg.MessageSize := MessageSizeType:Response_Data;
+                out_msg.partition_hit := false;
+            }
+        }
+        dir_entry.writebackTriggered := false;
+        responseFromDirInPort.dequeue(clockEdge());
+        wakeup_port(requestInPort, address);
+    }
+
+    // actions on in_port
+
+    action(popMemResponseQueue, desc="Pop the memory response queue") {
+        responseFromDirInPort.dequeue(clockEdge());
+    }
+
+    action(popResponseQueue, desc="Pop the response queue") {
+        responseInPort.dequeue(clockEdge());
+    }
+
+    action(popRequestQueue, desc="Pop the request queue") {
+        requestInPort.dequeue(clockEdge());
+    }
+
+    action(stallAndWaitRequestQueue, desc="...") {
+        Addr stalled_address;
+        peek(requestInPort, RequestMsg) {
+            stalled_address := in_msg.addr;
+        }
+        stall_and_wait(requestInPort, stalled_address);
+    }
+
+    ////////////////////////////////////////////////////////////////////////////
+    // TRANSITIONS
+    ////////////////////////////////////////////////////////////////////////////
+
+    // Transition for L1 request
+
+    // on cache entry replacement (normal mode)
+    transition(V_Clean, Replacement, InMem) {
+        sendInv;
+        deallocateCacheEntry;
+    }
+
+    transition(V_Dirty, Replacement, MemWritePending) {BankAccess} {
+        initiateWriteback;
+        sendInv;
+        sendMemWrite;
+        deallocateCacheEntry;
+    }
+
+    transition(M, Replacement, MI_D) {
+        initiateWriteback;
+        sendInv;
+        deallocateCacheEntry;
+    }
+
+    // on partition replacement (partition mode)
+    transition({M, V_Clean, V_Dirty, MV_D}, Par_Replacement) {
+        sendInv;
+        performParReplacement;
+    }
+
+    transition(M, Par_Replacement_M, MV_D) {
+        sendInv;
+        performParReplacement;
+    }
+
+    // on cache entry replacement (partition mode)
+    transition(V_Clean, Phy_Replacement, InMem) {
+        deallocateCacheEntry;
+    }
+
+    transition(V_Dirty, Phy_Replacement, MemWritePending) {BankAccess} {
+        initiateWriteback;
+        sendMemWrite;
+        deallocateCacheEntry;
+    }
+
+    transition(MV_D, Phy_Replacement, MI_D) {
+        initiateWriteback;
+        deallocateCacheEntry;
+    }
+
+    // on GetS/GetM
+    transition({V_Clean, V_Dirty}, GetS) {BankAccess} {
+        sendData;
+        popRequestQueue;
+    }
+
+    transition({V_Clean, V_Dirty}, GetM, M) {BankAccess} {
+        setOwner;
+        sendData;
+        popRequestQueue;
+    }
+
+    transition(M, {GetS, GetM}, MV_D) {
+        markCacheEntryAsBusyIfInNormalMode;
+        stallAndWaitRequestQueue;
+    }
+
+    transition(InMem, GetS, MemReadPending_V) {
+        sendMemRead;
+        popRequestQueue;
+        markCacheEntryAsBusy;
+    }
+
+    transition(InMem, GetM, MemReadPending_M) {
+        setOwner;
+        sendMemRead;
+        popRequestQueue;
+        markCacheEntryAsBusy;
+    }
+
+    transition({MemReadPending_V, MemReadPending_M, MemWritePending, MI_D}, {GetS, GetM}) {
+        markCacheEntryAsBusy;
+        stallAndWaitRequestQueue;
+    }
+
+    transition(MV_D, {GetS, GetM}) {
+        stallAndWaitRequestQueue;
+    }
+
+    // On Upg
+    transition({V_Clean, V_Dirty}, Upg, M) {
+        setOwner;
+        popRequestQueue;
+    }
+
+    transition(MV_D, Upg) {
+        markCacheEntryAsBusyIfInNormalMode;
+        stallAndWaitRequestQueue;
+    }
+
+    // On Put
+    transition(M, Put, MV_D) {
+        initiatePutRequest;
+        markCacheEntryAsBusyIfInNormalMode;
+        popRequestQueue;
+    }
+
+    // Transition on Writeback data from L1
+    transition(MV_D, L1_Writeback_Data, V_Dirty) {BankAccess} {
+        completeL1Writeback;
+        sendAckIfPutPending;
+        popResponseQueue;
+        markCacheEntryAsFree;
+    }
+
+    transition(MI_D, L1_Writeback_Data, MemWritePending) {
+        sendAckIfPutPending;
+        forwardL1Writeback;
+        popResponseQueue;
+    }
+
+    // Transition on memory responses
+
+    transition(MemWritePending, Mem_Ack, InMem) {
+        completeMemWriteback;
+    }
+
+    transition(MemReadPending_M, Mem_Response, M) {BankAccess} {
+        completeMemRead;
+        markCacheEntryAsFree;
+        setDirty;
+    }
+
+    transition(MemReadPending_V, Mem_Response, V_Clean) {BankAccess} {
+        completeMemRead;
+        markCacheEntryAsFree;
+        unsetDirty;
+    }
+
+}

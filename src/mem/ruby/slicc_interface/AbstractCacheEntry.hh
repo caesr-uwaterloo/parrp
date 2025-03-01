@@ -102,6 +102,8 @@ class AbstractCacheEntry : public ReplaceableEntry
 
     // Address of this block, required by CacheMemory
     Addr m_Address;
+    // Busy status
+    bool busy;
     // Holds info whether the address is locked.
     // Required for implementing LL/SC operations.
     int m_locked;

@@ -59,6 +59,8 @@
 #include "mem/ruby/system/RubySystem.hh"
 #include "sim/system.hh"
 
+#include "mem/ruby/system/CustomMemProbe.hh"
+
 namespace gem5
 {
 
@@ -692,6 +694,56 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
         ruby_hit_callback(pkt);
         testDrainComplete();
     }
+
+    if (m_ruby_system->m_omptr_trace) {
+        // @omptr tracing support
+        CustomMemTrace tr;
+
+        // assign basic info
+        int context_id = pkt->req->contextId();
+        if (m_ruby_system->m_use_traffic_gen) {
+            tr.bb_id = context_id;
+        } else {
+            tr.bb_id = -1;  // set default value, actual bb_id will be populated by CustomMemProbe later
+        }
+        tr.thread_id = context_id;
+        tr.address = request_address;
+        tr.line_address = makeLineAddress(request_address);
+
+        // assign access type
+        if (type == RubyRequestType_IFETCH) {
+            tr.access_type = CustomMemTrace_AccessType::IFETCH;
+        } else if (type == RubyRequestType_LD) {
+            tr.access_type = CustomMemTrace_AccessType::READ;
+        } else {
+            tr.access_type = CustomMemTrace_AccessType::WRITE;
+        }
+
+        // assign access region
+        if (m_ruby_system->m_use_traffic_gen) {
+            tr.data_region = CustomMemTrace_DataRegion::GLOBAL;
+        } else {
+            Addr v_addr = pkt->req->getVaddr();
+            Addr p_addr;
+            Process *proc = system->threads[context_id]->getProcessPtr();
+            EmulationPageTable *pTable = proc->pTable;
+            // sanity check to make sure we obtain the right page table
+            assert(pTable->translate(v_addr, p_addr));
+            assert(p_addr == request_address); 
+            tr.data_region = CustomMemProbe::getDataRegion(v_addr, proc);
+        }
+
+        // assign hit status
+        if (!externalHit || mach == MachineType_L1Cache) {
+            tr.hit_status = CustomMemTrace_HitStatus::Local_L1Cache;
+        } else if (mach == MachineType_L2Cache) {
+            tr.hit_status = CustomMemTrace_HitStatus::L2Cache;
+        } else {
+            tr.hit_status = CustomMemTrace_HitStatus::Memory;
+        }
+        
+        m_ruby_system->recordCustomMemTrace(tr);
+    }
 }
 
 void
@@ -799,12 +851,14 @@ Sequencer::makeRequest(PacketPtr pkt)
         if (pkt->isWrite()) {
             DPRINTF(RubySequencer, "Issuing Locked RMW Write\n");
             primary_type = RubyRequestType_Locked_RMW_Write;
+            secondary_type = RubyRequestType_Locked_RMW_Write;
         } else {
             DPRINTF(RubySequencer, "Issuing Locked RMW Read\n");
             assert(pkt->isRead());
             primary_type = RubyRequestType_Locked_RMW_Read;
+            secondary_type = RubyRequestType_Locked_RMW_Read;
         }
-        secondary_type = RubyRequestType_ST;
+        // secondary_type = RubyRequestType_ST;
     } else if (pkt->req->isTlbiCmd()) {
         primary_type = secondary_type = tlbiCmdToRubyRequestType(pkt);
         DPRINTF(RubySequencer, "Issuing TLBI\n");

@@ -46,6 +46,8 @@
 #include "params/RubySystem.hh"
 #include "sim/clocked_object.hh"
 
+#include "mem/ruby/system/CustomMemProbe.hh"
+
 namespace gem5
 {
 
@@ -158,6 +160,17 @@ class RubySystem : public ClockedObject
     Profiler* m_profiler;
     CacheRecorder* m_cache_recorder;
     std::vector<std::map<uint32_t, AbstractController *> > m_abstract_controls;
+
+  // @omptr tracing support
+  public:
+    void regProbePoints() override;
+    void recordCustomMemTrace(const CustomMemTrace &tr);
+    static bool m_omptr_trace;
+    static bool m_use_traffic_gen;
+  
+  private:
+    CustomMemProbePointUPtr ppCustomMemTrace;
+
 };
 
 } // namespace ruby

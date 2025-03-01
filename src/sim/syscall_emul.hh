@@ -110,6 +110,9 @@
 #include "sim/syscall_emul_buf.hh"
 #include "sim/syscall_return.hh"
 
+// @omptr tracing support
+#include "mem/ruby/system/CustomMemProbe.hh"
+
 #if defined(__APPLE__) && defined(__MACH__) && !defined(CMSG_ALIGN)
 #define CMSG_ALIGN(len) (((len) + sizeof(size_t) - 1) & ~(sizeof(size_t) - 1))
 #elif defined(__FreeBSD__) && !defined(CMSG_ALIGN)
@@ -2680,6 +2683,23 @@ writeFunc(SyscallDesc *desc, ThreadContext *tc,
 
     if (bytes_written != -1)
         fsync(sim_fd);
+
+    // @omptr trace basic block scope
+    if (bytes_written != -1) {
+        int bb_id = -1;
+        char bb_point[10];
+        char *string_buffer = new char[nbytes + 1];
+        std::memcpy(string_buffer, buf_arg.bufferPtr(), nbytes);
+        string_buffer[nbytes] = '\0';
+        if (sscanf(string_buffer, "[OMPTR] BB %d %s", &bb_id, bb_point) == 2) {
+            if (strcmp(bb_point, "starts.") == 0) {
+                ruby::CustomMemProbe::start_bb_scope(bb_id, tc->contextId());
+            } else if (strcmp(bb_point, "ends.") == 0) {
+                ruby::CustomMemProbe::end_bb_scope(tc->contextId());
+            }
+        }
+        delete[] string_buffer;
+    }
 
     return (bytes_written == -1) ? -errno : bytes_written;
 }

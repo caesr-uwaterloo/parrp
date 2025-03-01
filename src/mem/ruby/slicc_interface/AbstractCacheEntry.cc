@@ -57,6 +57,7 @@ AbstractCacheEntry::AbstractCacheEntry() : ReplaceableEntry()
     m_last_touch_tick = 0;
     m_htmInReadSet = false;
     m_htmInWriteSet = false;
+    busy = false;
 }
 
 AbstractCacheEntry::~AbstractCacheEntry()

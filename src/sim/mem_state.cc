@@ -49,7 +49,7 @@ MemState::MemState(Process *owner, Addr brk_point, Addr stack_base,
       _stackBase(stack_base), _stackSize(max_stack_size),
       _maxStackSize(max_stack_size), _stackMin(stack_base - max_stack_size),
       _nextThreadStackBase(next_thread_stack_base),
-      _mmapEnd(mmap_end), _endBrkPoint(brk_point)
+      _mmapEnd(mmap_end), _endBrkPoint(brk_point), _startBrkPoint(brk_point)
 {
 }
 

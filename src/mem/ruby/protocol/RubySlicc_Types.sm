@@ -196,12 +196,19 @@ structure (DirectoryMemory, external = "yes") {
 
 structure (CacheMemory, external = "yes") {
   bool cacheAvail(Addr);
+  bool cacheAvail(Addr, int);
+  bool isParHit(Addr, int);
+  void setBusy(Addr);
+  void setFree(Addr);
   Addr cacheProbe(Addr);
+  Addr cacheProbe(Addr, int);
   AbstractCacheEntry getNullEntry();
   AbstractCacheEntry allocate(Addr, AbstractCacheEntry);
+  AbstractCacheEntry allocate(Addr, AbstractCacheEntry, int);
   AbstractCacheEntry allocate(Addr, AbstractCacheEntry, bool);
   void allocateVoid(Addr, AbstractCacheEntry);
   void deallocate(Addr);
+  void deallocate(Addr, int);
   AbstractCacheEntry lookup(Addr);
   bool isTagPresent(Addr);
   Cycles getTagLatency();
@@ -209,8 +216,10 @@ structure (CacheMemory, external = "yes") {
   void setMRU(Addr);
   void setMRU(Addr, int);
   void setMRU(AbstractCacheEntry);
+  void setMRU(AbstractCacheEntry, int);
   void recordRequestType(CacheRequestType, Addr);
   bool checkResourceAvailable(CacheResourceType, Addr);
+  Addr addressToCacheSetUnsigned(Addr address);
 
   // hardware transactional memory
   void htmCommitTransaction();
@@ -224,6 +233,13 @@ structure (CacheMemory, external = "yes") {
   void profileDemandMiss();
   void profilePrefetchHit();
   void profilePrefetchMiss();
+}
+
+structure (SetSequencer, external = "yes") {
+    void add_pending_request(Addr, Cycles);
+    bool can_retire(Addr, Cycles);
+    void finish_request(Addr, Cycles);
+    Cycles get_oldest_req(Addr);
 }
 
 structure (WireBuffer, inport="yes", outport="yes", external = "yes") {
@@ -249,4 +265,20 @@ structure (RubyPrefetcher, external = "yes") {
     void observeMiss(Addr, RubyRequestType);
     void observePfHit(Addr);
     void observePfMiss(Addr);
+}
+
+// Custom profiler for gathering statistics
+structure(CustomProfiler, external="yes") {
+    void profileGetRequest();
+    void profileL1Hit();
+    void profileL1Miss();
+    void profileUpg();
+    void profileCacheToCacheTrf();
+    void profileLLCHit();
+    void profileMemoryRead();
+    void profileMemoryWrite();
+    void profileBackInvalidation();
+    void profileBackInvalidationWB();
+    void profilePutRequest();
+    void profileMemLatency(Cycles latency);
 }

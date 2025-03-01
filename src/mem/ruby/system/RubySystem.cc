@@ -75,12 +75,16 @@ bool RubySystem::m_warmup_enabled = false;
 // of RubySystems that need to be warmed up on checkpoint restore.
 unsigned RubySystem::m_systems_to_warmup = 0;
 bool RubySystem::m_cooldown_enabled = false;
+bool RubySystem::m_omptr_trace;
+bool RubySystem::m_use_traffic_gen;
 
 RubySystem::RubySystem(const Params &p)
     : ClockedObject(p), m_access_backing_store(p.access_backing_store),
       m_cache_recorder(NULL)
 {
     m_randomization = p.randomization;
+    m_omptr_trace = p.omptr_trace;
+    m_use_traffic_gen = p.use_traffic_gen;
 
     m_block_size_bytes = p.block_size_bytes;
     assert(isPowerOf2(m_block_size_bytes));
@@ -545,12 +549,7 @@ RubySystem::functionalRead(PacketPtr pkt)
     // The reason is because the Backing_Store memory could easily be stale, if
     // there are copies floating around the cache hierarchy, so you want to read
     // it only if it's not in the cache hierarchy at all.
-    int num_controllers = netCntrls[request_net_id].size();
-    if (num_invalid == (num_controllers - 1) && num_backing_store == 1) {
-        DPRINTF(RubySystem, "only copy in Backing_Store memory, read from it\n");
-        ctrl_backing_store->functionalRead(line_address, pkt);
-        return true;
-    } else if (num_ro > 0 || num_rw >= 1) {
+    if (num_ro > 0 || num_rw >= 1) {
         if (num_rw > 1) {
             // We iterate over the vector of abstract controllers, and return
             // the first copy found. If we have more than one cache with block
@@ -574,7 +573,11 @@ RubySystem::functionalRead(PacketPtr pkt)
             ctrl_ro->functionalRead(line_address, pkt);
         }
         return true;
-    } else if ((num_busy + num_maybe_stale) > 0) {
+    }
+
+    // Always check for network buffer for functional read 
+    
+    // else if ((num_busy + num_maybe_stale) > 0) {
         // No controller has a valid copy of the block, but a transient or
         // stale state indicates a valid copy should be in transit in the
         // network or in a message buffer waiting to be handled
@@ -592,6 +595,13 @@ RubySystem::functionalRead(PacketPtr pkt)
             if (network->functionalRead(pkt))
                 return true;
         }
+    // }
+
+    // if we reach here, access backing store if present
+    if (num_backing_store == 1) {
+        DPRINTF(RubySystem, "only copy in Backing_Store memory, read from it\n");
+        ctrl_backing_store->functionalRead(line_address, pkt);
+        return true;
     }
 
     return false;
@@ -742,6 +752,24 @@ RubySystem::functionalWrite(PacketPtr pkt)
     DPRINTF(RubySystem, "Messages written = %u\n", num_functional_writes);
 
     return true;
+}
+
+void
+RubySystem::regProbePoints()
+{
+    // register probe point "CustomMemProbe"
+    ppCustomMemTrace.reset(
+        new CustomMemProbePoint(
+            getProbeManager(), 
+            "CustomMemProbe"
+            )
+    );
+}
+
+void
+RubySystem::recordCustomMemTrace(const CustomMemTrace &tr)
+{
+    ppCustomMemTrace->notify(tr);
 }
 
 } // namespace ruby

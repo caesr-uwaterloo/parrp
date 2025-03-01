@@ -144,6 +144,8 @@ class SimpleExecContext : public ExecContext
                        "Number of busy cycles"),
               ADD_STAT(notIdleFraction, statistics::units::Ratio::get(),
                        "Percentage of non-idle cycles"),
+              ADD_STAT(scopedNotIdleFraction, statistics::units::Ratio::get(),
+                       "Percentage of non-idle cycles"),
               ADD_STAT(idleFraction, statistics::units::Ratio::get(),
                        "Percentage of idle cycles"),
               ADD_STAT(icacheStallCycles, statistics::units::Cycle::get(),
@@ -274,6 +276,7 @@ class SimpleExecContext : public ExecContext
 
         // Number of idle cycles
         statistics::Average notIdleFraction;
+        statistics::Average scopedNotIdleFraction;
         statistics::Formula idleFraction;
 
         // Number of cycles stalled for I-cache responses

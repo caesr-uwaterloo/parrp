@@ -177,6 +177,7 @@ class Profiler
 
         //! Histogram for holding latency profile of all requests.
         statistics::Histogram m_latencyHistSeqr;
+        statistics::Histogram m_latencyHistSeqr0;
         statistics::Histogram m_latencyHistCoalsr;
 
         //! Histogram for holding latency profile of all requests that

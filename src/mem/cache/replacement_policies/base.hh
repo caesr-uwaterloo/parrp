@@ -67,6 +67,12 @@ class Base : public SimObject
     virtual void invalidate(const std::shared_ptr<ReplacementData>&
         replacement_data) = 0;
 
+    virtual void invalidate(const std::shared_ptr<ReplacementData>&
+        replacement_data, int par_id)
+    {
+        invalidate(replacement_data);
+    }
+
     /**
      * Update replacement data.
      *
@@ -81,6 +87,12 @@ class Base : public SimObject
     virtual void touch(const std::shared_ptr<ReplacementData>&
         replacement_data) const = 0;
 
+    virtual void touch(const std::shared_ptr<ReplacementData>&
+        replacement_data, int par_id)
+    {
+        touch(replacement_data);
+    }
+
     /**
      * Reset replacement data. Used when it's holder is inserted/validated.
      *
@@ -94,6 +106,12 @@ class Base : public SimObject
     }
     virtual void reset(const std::shared_ptr<ReplacementData>&
         replacement_data) const = 0;
+    
+    virtual void reset(const std::shared_ptr<ReplacementData>&
+        replacement_data, int par_id)
+    {
+        reset(replacement_data);
+    }
 
     /**
      * Find replacement victim among candidates.
@@ -103,6 +121,12 @@ class Base : public SimObject
      */
     virtual ReplaceableEntry* getVictim(
                            const ReplacementCandidates& candidates) const = 0;
+    
+    virtual ReplaceableEntry* getVictim(
+                           const ReplacementCandidates& candidates, int par_id)
+    {
+        return getVictim(candidates);
+    }
 
     /**
      * Instantiate a replacement data entry.

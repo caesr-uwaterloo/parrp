@@ -149,3 +149,11 @@ class WeightedLRURP(LRURP):
     type = "WeightedLRURP"
     cxx_class = 'gem5::replacement_policy::WeightedLRU'
     cxx_header = "mem/cache/replacement_policies/weighted_lru_rp.hh"
+
+class ParRP(BaseReplacementPolicy):
+    type = 'ParRP'
+    cxx_class = 'gem5::replacement_policy::Par'
+    cxx_header = "mem/cache/replacement_policies/par_rp.hh"
+    replacement_policy = Param.BaseReplacementPolicy(LRURP(), "Implemented replacement policy")
+    par_config = VectorParam.Int([-1], "Partition configuration")
+    num_way = Param.Int(1, "Number of cache ways in a cache set")

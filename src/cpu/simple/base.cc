@@ -201,6 +201,7 @@ BaseSimpleCPU::resetStats()
     BaseCPU::resetStats();
     for (auto &thread_info : threadInfo) {
         thread_info->execContextStats.notIdleFraction = (_status != Idle);
+        thread_info->execContextStats.scopedNotIdleFraction = (_status != Idle);
     }
 }
 

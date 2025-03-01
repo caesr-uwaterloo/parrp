@@ -1,0 +1,54 @@
+syntax = "proto2";
+
+// Put all the generated messages in a namespace
+package ProtoMessage;
+
+message CustomMemTrace {
+  required int32 bb_id = 1;
+  required uint64 address = 2;
+  required uint64 line_address = 3;
+
+  enum AccessType {
+    IFETCH = 0;
+    READ = 1;
+    WRITE = 2;
+  }
+  required AccessType access_type = 4;
+
+  enum HitStatus {
+    Local_L1Cache = 0;
+    Remote_L1Cache = 1;
+    L2Cache = 2;
+    Memory = 3;
+  }
+  required HitStatus hit_status = 5;
+  required int32 thread_id = 6;
+
+  enum DataRegion {
+    GLOBAL = 0;
+    STACK = 1;
+    HEAP = 2;
+  }
+  required DataRegion data_region = 7;
+}
+
+message AddrAccessStats {
+  required int32 bb_id = 1;
+  required uint64 address = 2;
+  required uint64 line_address = 3;
+  required bool is_ifetch = 4;
+  required uint64 num_local_l1_hit = 5;
+  required uint64 num_remote_l1_hit = 6;
+  required uint64 num_l2_hit = 7;
+  required uint64 num_memory_access = 8;
+  required int32 thread_id = 9;
+
+  enum DataRegion {
+    GLOBAL = 0;
+    STACK = 1;
+    HEAP = 2;
+  }
+  required DataRegion data_region = 10;
+  required bool is_metadata = 11;
+  required uint64 exec_cycles = 12;
+}

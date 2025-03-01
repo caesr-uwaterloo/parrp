@@ -50,6 +50,7 @@
 #include "debug/RubyResourceStalls.hh"
 #include "debug/RubyStats.hh"
 #include "mem/cache/replacement_policies/weighted_lru_rp.hh"
+#include "mem/cache/replacement_policies/par_rp.hh"
 #include "mem/ruby/protocol/AccessPermission.hh"
 #include "mem/ruby/system/RubySystem.hh"
 
@@ -104,6 +105,7 @@ CacheMemory::init()
     // instantiate all the replacement_data here
     for (int i = 0; i < m_cache_num_sets; i++) {
         for ( int j = 0; j < m_cache_assoc; j++) {
+            // DPRINTF(RubyCache, "init: way index %d\n", j);
             replacement_data[i][j] =
                                 m_replacementPolicy_ptr->instantiateEntry();
         }
@@ -124,6 +126,14 @@ CacheMemory::~CacheMemory()
 // convert a Address to its location in the cache
 int64_t
 CacheMemory::addressToCacheSet(Addr address) const
+{
+    assert(address == makeLineAddress(address));
+    return bitSelect(address, m_start_index_bit,
+                     m_start_index_bit + m_cache_num_set_bits - 1);
+}
+
+Addr
+CacheMemory::addressToCacheSetUnsigned(Addr address) const
 {
     assert(address == makeLineAddress(address));
     return bitSelect(address, m_start_index_bit,
@@ -265,6 +275,62 @@ CacheMemory::cacheAvail(Addr address) const
     return false;
 }
 
+bool
+CacheMemory::cacheAvail(Addr address, int par_id) const
+{
+    assert(address == makeLineAddress(address));
+    int64_t cacheSet = addressToCacheSet(address);
+    DPRINTF(RubyCache, "cacheAvail: Addr 0x%x, par id: %d, cache set: 0x%x\n", address, par_id, cacheSet);
+    if (isParHit(address, par_id)) {
+        return true;
+    }
+
+    bool res = static_cast<replacement_policy::Par*>(
+                m_replacementPolicy_ptr)->parAvail(
+                replacement_data[cacheSet][0], par_id);
+    return res;
+}
+
+void
+CacheMemory::setBusy(Addr address) {
+    assert(address == makeLineAddress(address));
+    assert(cacheAvail(address));
+    DPRINTF(RubyCache, "setBusy: Addr 0x%x\n", address);
+    AbstractCacheEntry* entry = lookup(address);
+    assert(entry != nullptr);
+    entry->busy = true;
+    // static_cast<replacement_policy::Par*>(
+    //             m_replacementPolicy_ptr)->setBusy(
+    //             entry->replacementData);
+}
+
+void
+CacheMemory::setFree(Addr address) {
+    assert(address == makeLineAddress(address));
+    assert(cacheAvail(address));
+    DPRINTF(RubyCache, "setFree: Addr 0x%x\n", address);
+    AbstractCacheEntry* entry = lookup(address);
+    assert(entry != nullptr);
+    entry->busy = false;
+    // static_cast<replacement_policy::Par*>(
+    //             m_replacementPolicy_ptr)->setBusy(
+    //             entry->replacementData);
+}
+
+bool
+CacheMemory::isParHit(Addr address, int par_id) const {
+    assert(address == makeLineAddress(address));
+    const AbstractCacheEntry* entry = lookup(address);
+    if (entry == nullptr) {
+        // if entry is not presented in the cache set, it must not be allocated in a parition
+        return false;
+    }
+    bool res = static_cast<replacement_policy::Par*>(
+                m_replacementPolicy_ptr)->parHit(
+                entry->replacementData, par_id);
+    return res;
+}
+
 AbstractCacheEntry*
 CacheMemory::allocate(Addr address, AbstractCacheEntry *entry)
 {
@@ -306,6 +372,49 @@ CacheMemory::allocate(Addr address, AbstractCacheEntry *entry)
     panic("Allocate didn't find an available entry");
 }
 
+// Partitioned replacement policy version of allocate
+AbstractCacheEntry*
+CacheMemory::allocate(Addr address, AbstractCacheEntry *entry, int par_id)
+{
+    assert(address == makeLineAddress(address));
+    assert(!isTagPresent(address));
+    assert(cacheAvail(address));
+    DPRINTF(RubyCache, "address: %#x\n", address);
+
+    // Find the first open slot
+    int64_t cacheSet = addressToCacheSet(address);
+    std::vector<AbstractCacheEntry*> &set = m_cache[cacheSet];
+    for (int i = 0; i < m_cache_assoc; i++) {
+        if (!set[i] || set[i]->m_Permission == AccessPermission_NotPresent) {
+            if (set[i] && (set[i] != entry)) {
+                warn_once("This protocol contains a cache entry handling bug: "
+                    "Entries in the cache should never be NotPresent! If\n"
+                    "this entry (%#x) is not tracked elsewhere, it will memory "
+                    "leak here. Fix your protocol to eliminate these!",
+                    address);
+            }
+            set[i] = entry;  // Init entry
+            set[i]->m_Address = address;
+            set[i]->m_Permission = AccessPermission_Invalid;
+            DPRINTF(RubyCache, "Allocate clearing lock for addr: %x\n",
+                    address);
+            set[i]->m_locked = -1;
+            m_tag_index[address] = i;
+            set[i]->setPosition(cacheSet, i);
+            set[i]->replacementData = replacement_data[cacheSet][i];
+            set[i]->setLastAccess(curTick());
+
+            // Call reset function here to set initial value for different
+            // replacement policies.
+            DPRINTF(RubyCache, "allocate: way index %d\n", i);
+            m_replacementPolicy_ptr->reset(entry->replacementData, par_id);
+
+            return entry;
+        }
+    }
+    panic("Allocate didn't find an available entry");
+}
+
 void
 CacheMemory::deallocate(Addr address)
 {
@@ -320,6 +429,16 @@ CacheMemory::deallocate(Addr address)
     m_tag_index.erase(address);
 }
 
+// Partitioned replacement policy version of deallocate
+void
+CacheMemory::deallocate(Addr address, int par_id)
+{
+    DPRINTF(RubyCache, "address: %#x\n", address);
+    AbstractCacheEntry* entry = lookup(address);
+    assert(entry != nullptr);
+    m_replacementPolicy_ptr->invalidate(entry->replacementData, par_id);
+}
+
 // Returns with the physical address of the conflicting cache line
 Addr
 CacheMemory::cacheProbe(Addr address) const
@@ -330,11 +449,40 @@ CacheMemory::cacheProbe(Addr address) const
     int64_t cacheSet = addressToCacheSet(address);
     std::vector<ReplaceableEntry*> candidates;
     for (int i = 0; i < m_cache_assoc; i++) {
-        candidates.push_back(static_cast<ReplaceableEntry*>(
+        if (m_cache[cacheSet][i] && (!m_cache[cacheSet][i]->busy)) {
+            candidates.push_back(static_cast<ReplaceableEntry*>(
                                                        m_cache[cacheSet][i]));
+        }
+    }
+    if (candidates.size() == 0) {
+        DPRINTF(RubyCache, "No candidate victim found for set %#x\n", cacheSet);
+        for (int i = 0; i < m_cache_assoc; i++) {
+            if (m_cache[cacheSet][i] && (m_cache[cacheSet][i]->busy)) {
+                DPRINTF(RubyCache, "Busy cache line: %#x\n", m_cache[cacheSet][i]->m_Address);
+            }
+        } 
+        assert(false);
     }
     return m_cache[cacheSet][m_replacementPolicy_ptr->
                         getVictim(candidates)->getWay()]->m_Address;
+}
+
+// Partitioned replacement policy version of cacheProbe
+Addr
+CacheMemory::cacheProbe(Addr address, int par_id) const
+{
+    assert(address == makeLineAddress(address));
+
+    int64_t cacheSet = addressToCacheSet(address);
+    std::vector<ReplaceableEntry*> candidates;
+    for (int i = 0; i < m_cache_assoc; i++) {
+        if (m_cache[cacheSet][i] && (!m_cache[cacheSet][i]->busy)) {
+            candidates.push_back(static_cast<ReplaceableEntry*>(
+                                                        m_cache[cacheSet][i]));
+        }
+    }
+    return m_cache[cacheSet][m_replacementPolicy_ptr->
+                        getVictim(candidates, par_id)->getWay()]->m_Address;
 }
 
 // looks an address up in the cache
@@ -375,6 +523,14 @@ CacheMemory::setMRU(AbstractCacheEntry *entry)
 {
     assert(entry != nullptr);
     m_replacementPolicy_ptr->touch(entry->replacementData);
+    entry->setLastAccess(curTick());
+}
+
+void
+CacheMemory::setMRU(AbstractCacheEntry *entry, int par_id)
+{
+    assert(entry != nullptr);
+    m_replacementPolicy_ptr->touch(entry->replacementData, par_id);
     entry->setLastAccess(curTick());
 }
 

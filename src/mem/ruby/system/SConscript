@@ -68,3 +68,6 @@ Source('RubySystem.cc')
 Source('Sequencer.cc')
 if env['CONF']['BUILD_GPU']:
     Source('VIPERCoalescer.cc')
+
+SimObject('CustomMemProbe.py', sim_objects=['CustomMemProbe'], tags='protobuf')
+Source('CustomMemProbe.cc', tags='protobuf')

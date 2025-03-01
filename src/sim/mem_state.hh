@@ -80,6 +80,8 @@ class MemState : public Serializable
      * the process' memory.
      */
     Addr getBrkPoint() const { return _brkPoint; }
+    Addr getEndBrkPoint() const { return _endBrkPoint; }
+    Addr getStartBrkPoint() const { return _startBrkPoint; }
     Addr getStackBase() const { return _stackBase; }
     Addr getStackSize() const { return _stackSize; }
     Addr getMaxStackSize() const { return _maxStackSize; }
@@ -265,6 +267,11 @@ class MemState : public Serializable
      * Keeps record of the furthest mapped heap location.
      */
     Addr _endBrkPoint;
+
+    /**
+     * Keeps record of the initial mapped heap location.
+     */
+    Addr _startBrkPoint;
 
     /**
      * The _vmaList member is a list of virtual memory areas in the target

@@ -68,6 +68,8 @@ DebugFlag('RubyTester')
 DebugFlag('RubyStats')
 DebugFlag('RubyResourceStalls')
 DebugFlag('RubyProtocol')
+DebugFlag('TDM')
+DebugFlag('OMPTR')
 
 CompoundFlag('Ruby', [ 'RubyQueue', 'RubyNetwork', 'RubyTester',
     'RubyGenerated', 'RubySlicc', 'RubySystem', 'RubyCache',
@@ -106,6 +108,7 @@ MakeInclude('common/Set.hh')
 MakeInclude('common/WriteMask.hh')
 MakeInclude('network/MessageBuffer.hh')
 MakeInclude('structures/CacheMemory.hh')
+MakeInclude('structures/SetSequencer.hh')
 MakeInclude('structures/DirectoryMemory.hh')
 MakeInclude('structures/PerfectCacheMemory.hh')
 MakeInclude('structures/PersistentTable.hh')
@@ -127,3 +130,6 @@ MakeInclude('system/Sequencer.hh')
 MakeInclude('system/GPUCoalescer.hh')
 MakeInclude('system/HTMSequencer.hh')
 MakeInclude('system/VIPERCoalescer.hh')
+
+MakeInclude('profiler/CustomProfiler.hh')
+MakeInclude('system/CustomMemProbe.hh')

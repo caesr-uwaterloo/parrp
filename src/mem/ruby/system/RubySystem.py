@@ -54,3 +54,6 @@ class RubySystem(ClockedObject):
     all_instructions = Param.Bool(False, "")
     num_of_sequencers = Param.Int("")
     number_of_virtual_networks = Param.Unsigned("")
+
+    omptr_trace = Param.Bool(False, "Enable omptr tracing")
+    use_traffic_gen = Param.Bool(False, "If traffic generator is in used")

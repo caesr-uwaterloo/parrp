@@ -66,14 +66,14 @@ args = parser.parse_args()
 # Set the default cache size and associativity to be very small to encourage
 # races between requests and writebacks.
 #
-args.l1d_size="256B"
-args.l1i_size="256B"
-args.l2_size="512B"
-args.l3_size="1kB"
-args.l1d_assoc=2
-args.l1i_assoc=2
-args.l2_assoc=2
-args.l3_assoc=2
+# args.l1d_size="256B"
+# args.l1i_size="256B"
+# args.l2_size="512B"
+# args.l3_size="1kB"
+# args.l1d_assoc=2
+# args.l1i_assoc=2
+# args.l2_assoc=2
+# args.l3_assoc=2
 
 block_size = 64
 
@@ -115,17 +115,17 @@ Ruby.create_system(args, False, system, dma_ports = dma_ports)
 
 # Create a top-level voltage domain and clock domain
 system.voltage_domain = VoltageDomain(voltage = args.sys_voltage)
-system.clk_domain = SrcClockDomain(clock = args.sys_clock,
+system.clk_domain = SrcClockDomain(clock = "2GHz",
                                    voltage_domain = system.voltage_domain)
 # Create a seperate clock domain for Ruby
-system.ruby.clk_domain = SrcClockDomain(clock = args.ruby_clock,
+system.ruby.clk_domain = SrcClockDomain(clock = "20GHz",
                                         voltage_domain = system.voltage_domain)
 
 #
 # The tester is most effective when randomization is turned on and
 # artifical delay is randomly inserted on messages
 #
-system.ruby.randomization = True
+system.ruby.randomization = False
 
 assert(len(cpus) == len(system.ruby._cpu_ports))
 
@@ -149,7 +149,7 @@ root = Root( full_system = False, system = system )
 root.system.mem_mode = 'timing'
 
 # Not much point in this being higher than the L1 latency
-m5.ticks.setGlobalFrequency('1ns')
+m5.ticks.setGlobalFrequency('0.05ns')
 
 # instantiate configuration
 m5.instantiate()

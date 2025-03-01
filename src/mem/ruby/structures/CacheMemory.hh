@@ -92,6 +92,16 @@ class CacheMemory : public SimObject
     //   a) a tag match on this address or there is
     //   b) an unused line in the same cache "way"
     bool cacheAvail(Addr address) const;
+    // return True, if Address is in the partition or the partition has a free entry
+    bool cacheAvail(Addr address, int par_id) const;
+
+    // mark the cache line as busy
+    void setBusy(Addr address);
+    // mark the cache line as free
+    void setFree(Addr address);
+
+    // check if the address is in a partition
+    bool isParHit(Addr address, int par_id) const;
 
     // Returns a NULL entry that acts as a placeholder for invalid lines
     AbstractCacheEntry*
@@ -102,6 +112,7 @@ class CacheMemory : public SimObject
 
     // find an unused entry and sets the tag appropriate for the address
     AbstractCacheEntry* allocate(Addr address, AbstractCacheEntry* new_entry);
+    AbstractCacheEntry* allocate(Addr address, AbstractCacheEntry* new_entry, int par_id);
     void allocateVoid(Addr address, AbstractCacheEntry* new_entry)
     {
         allocate(address, new_entry);
@@ -109,9 +120,11 @@ class CacheMemory : public SimObject
 
     // Explicitly free up this address
     void deallocate(Addr address);
+    void deallocate(Addr address, int par_id);
 
     // Returns with the physical address of the conflicting cache line
     Addr cacheProbe(Addr address) const;
+    Addr cacheProbe(Addr address, int par_id) const;
 
     // looks an address up in the cache
     AbstractCacheEntry* lookup(Addr address);
@@ -130,6 +143,7 @@ class CacheMemory : public SimObject
     void setMRU(Addr address);
     void setMRU(Addr addr, int occupancy);
     void setMRU(AbstractCacheEntry* entry);
+    void setMRU(AbstractCacheEntry* entry, int par_id);
     int getReplacementWeight(int64_t set, int64_t loc);
 
     // Functions for locking and unlocking cache lines corresponding to the
@@ -158,6 +172,8 @@ class CacheMemory : public SimObject
     int getCacheAssoc() const { return m_cache_assoc; }
     int getNumBlocks() const { return m_cache_num_sets * m_cache_assoc; }
     Addr getAddressAtIdx(int idx) const;
+    // convert a Address to its location in the cache
+    Addr addressToCacheSetUnsigned(Addr address) const;
 
   private:
     // convert a Address to its location in the cache

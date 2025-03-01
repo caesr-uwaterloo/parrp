@@ -117,6 +117,7 @@ ProfilerStats::ProfilerStats(statistics::Group *parent, Profiler *profiler)
       ADD_STAT(m_outstandReqHistSeqr, ""),
       ADD_STAT(m_outstandReqHistCoalsr, ""),
       ADD_STAT(m_latencyHistSeqr, ""),
+      ADD_STAT(m_latencyHistSeqr0, ""),
       ADD_STAT(m_latencyHistCoalsr, ""),
       ADD_STAT(m_hitLatencyHistSeqr, ""),
       ADD_STAT(m_missLatencyHistSeqr, ""),
@@ -144,6 +145,10 @@ ProfilerStats::ProfilerStats(statistics::Group *parent, Profiler *profiler)
         .flags(statistics::nozero | statistics::pdf | statistics::oneline);
 
     m_latencyHistSeqr
+        .init(10)
+        .flags(statistics::nozero | statistics::pdf | statistics::oneline);
+    
+    m_latencyHistSeqr0
         .init(10)
         .flags(statistics::nozero | statistics::pdf | statistics::oneline);
 
@@ -422,6 +427,9 @@ Profiler::collateStats()
             AbstractController *ctr = (*it).second;
             Sequencer *seq = ctr->getCPUSequencer();
             if (seq != NULL) {
+                if (seq->coreId() == 0) {
+                    rubyProfilerStats.m_latencyHistSeqr0.add(seq->getLatencyHist());
+                }
                 // add all the latencies
                 rubyProfilerStats.
                         m_latencyHistSeqr.add(seq->getLatencyHist());
